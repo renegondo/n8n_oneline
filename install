@@ -1,72 +1,88 @@
 #!/bin/bash
-reset_previous_installation() {
-    echo "🧹 Limpiando instalaciones previas..."
-    sudo docker rm -f n8n 2>/dev/null
-    sudo rm -rf /etc/nginx/sites-{available,enabled}/n8n 2>/dev/null
-    sudo certbot delete --noninteractive --cert-name "$DOMAIN" 2>/dev/null
-    sudo rm -rf /tmp/n8n-auto-install ~/.n8n 2>/dev/null
-    echo "✅ Limpieza completada"
-}
+
+# --------------------------
+# Configuración inicial
+# --------------------------
+clear
+echo -e "\e[1;36m=== Instalador Automático de n8n ===\e[0m"
+
 # Solicitar datos
-echo -e "\e[32mIngresa el subdominio completo (ej: n8n.tudominio.com): \e[0m"
-read DOMAIN
-echo -e "\e[32mIngresa tu email para Let's Encrypt: \e[0m"
-read EMAIL
+read -p "Ingrese su subdominio completo (ej: n8n.tudominio.com): " DOMAIN
+read -p "Ingrese su email para Let's Encrypt: " EMAIL
 
-# Validar email
-while [[ ! "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; do
-    echo -e "\e[31mEmail inválido. Ingresa un email válido:\e[0m"
-    read EMAIL
-done
+# Validación básica
+if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+    echo -e "\e[31mError: Formato de dominio inválido\e[0m"
+    exit 1
+fi
 
-# Configuración
-N8N_PORT=5678
-SCRIPT_DIR="/tmp/n8n-auto-install"
+if [[ ! "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+    echo -e "\e[31mError: Email inválido\e[0m"
+    exit 1
+fi
 
-# Limpiar instalación previa
+# --------------------------
+# Limpieza previa
+# --------------------------
+echo -e "\n\e[33mRealizando limpieza previa...\e[0m"
 sudo docker rm -f n8n 2>/dev/null
+sudo rm -rf /tmp/n8n-auto-install 2>/dev/null
 sudo rm -f /etc/nginx/sites-{available,enabled}/n8n 2>/dev/null
-sudo rm -rf "$SCRIPT_DIR" ~/.n8n 2>/dev/null
+sudo certbot delete --non-interactive --cert-name "$DOMAIN" 2>/dev/null
 
-# Instalar dependencias esenciales
-sudo apt update && sudo apt install -y \
+# --------------------------
+# Instalar dependencias
+# --------------------------
+echo -e "\n\e[33mActualizando sistema...\e[0m"
+sudo apt update && sudo apt upgrade -y
+
+echo -e "\n\e[33mInstalando componentes clave...\e[0m"
+sudo apt install -y \
     curl \
     git \
     docker.io \
-    docker-compose-plugin \
     nginx \
     certbot \
     python3-certbot-nginx
 
+# Instalar Docker Compose
+if [ ! -f "/usr/local/bin/docker-compose" ]; then
+    echo -e "\n\e[33mInstalando Docker Compose...\e[0m"
+    sudo curl -L "https://github.com/docker/compose/releases/download/v2.27.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    sudo chmod +x /usr/local/bin/docker-compose
+fi
+
 # Configurar Docker
-sudo systemctl start docker
-sudo systemctl enable docker
+sudo systemctl enable --now docker
 sudo usermod -aG docker $USER
-newgrp docker  # Actualizar grupos sin necesidad de logout
+newgrp docker << EONG
+# --------------------------
+# Configuración de n8n
+# --------------------------
+echo -e "\n\e[33mPreparando entorno...\e[0m"
+WORKDIR="/tmp/n8n-auto-install"
+mkdir -p "$WORKDIR" && cd "$WORKDIR"
 
-# Preparar entorno
-mkdir -p "$SCRIPT_DIR" && cd "$SCRIPT_DIR"
-
-# Descargar plantillas
+echo -e "\n\e[33mDescargando configuración...\e[0m"
 curl -sO https://raw.githubusercontent.com/n8n-io/n8n/main/docker-compose.yml
 curl -s https://raw.githubusercontent.com/n8n-io/n8n/main/.env.example > .env
 
-# Configurar variables de entorno
+echo -e "\n\e[33mConfigurando variables...\e[0m"
 sed -i "s/N8N_HOST=localhost/N8N_HOST=$DOMAIN/" .env
 sed -i "s/WEBHOOK_URL=/WEBHOOK_URL=https:\/\/$DOMAIN\//" .env
 sed -i "s#~/.n8n#/root/.n8n#" docker-compose.yml
 
-# Iniciar contenedor
-sudo docker compose up -d
-
-# Configurar Nginx básico (solo HTTP)
-sudo tee /etc/nginx/sites-available/n8n >/dev/null <<EOF
+# --------------------------
+# Configuración inicial de Nginx
+# --------------------------
+echo -e "\n\e[33mConfigurando Nginx (HTTP)...\e[0m"
+sudo tee /etc/nginx/sites-available/n8n > /dev/null <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
 
     location / {
-        proxy_pass http://localhost:$N8N_PORT;
+        proxy_pass http://localhost:5678;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'Upgrade';
@@ -76,15 +92,25 @@ server {
 }
 EOF
 
-# Habilitar sitio
 sudo ln -sf /etc/nginx/sites-available/n8n /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl restart nginx
 
+# --------------------------
 # Obtener certificado SSL
-sudo certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL --redirect
+# --------------------------
+echo -e "\n\e[33mObteniendo certificado SSL...\e[0m"
+sudo certbot --nginx -d $DOMAIN \
+    --non-interactive \
+    --agree-tos \
+    --email $EMAIL \
+    --redirect \
+    --force-renewal
 
-# Configurar Nginx completo (HTTPS)
-sudo tee /etc/nginx/sites-available/n8n >/dev/null <<EOF
+# --------------------------
+# Configuración final de Nginx
+# --------------------------
+echo -e "\n\e[33mConfigurando Nginx (HTTPS)...\e[0m"
+sudo tee /etc/nginx/sites-available/n8n > /dev/null <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
@@ -99,17 +125,39 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
 
     location / {
-        proxy_pass http://localhost:$N8N_PORT;
+        proxy_pass http://localhost:5678;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'Upgrade';
         proxy_set_header Host \$host;
         proxy_cache_bypass \$http_upgrade;
+        proxy_buffering off;
     }
 }
 EOF
 
-# Reiniciar servicios finales
-sudo systemctl restart nginx docker
+# --------------------------
+# Iniciar servicios finales
+# --------------------------
+echo -e "\n\e[33mIniciando contenedores...\e[0m"
+docker-compose up -d
 
-echo -e "\n✅ Instalación completada! Accede en: \e[1mhttps://$DOMAIN\e[0m"
+echo -e "\n\e[33mAplicando configuración final...\e[0m"
+sudo systemctl restart nginx
+
+EONG
+
+# --------------------------
+# Limpieza final
+# --------------------------
+echo -e "\n\e[33mRealizando limpieza final...\e[0m"
+sudo rm -rf /tmp/n8n-auto-install
+
+# --------------------------
+# Verificación final
+# --------------------------
+echo -e "\n\e[1;32mInstalación completada!\e[0m"
+echo -e "Accede a tu instancia en: \e[1;34mhttps://$DOMAIN\e[0m"
+echo -e "\nVerifica el estado con:"
+echo -e "  sudo systemctl status n8n"
+echo -e "  docker ps"
