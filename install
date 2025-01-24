@@ -1,0 +1,59 @@
+#!/bin/bash
+
+# Solicitar subdominio interactivamente
+echo -e "\e[32mIngresa el subdominio para n8n (ej: n8n.tudominio.com): \e[0m"
+read SUBDOMINIO
+DOMAIN="$SUBDOMINIO"
+N8N_PORT=5678
+SCRIPT_DIR="/tmp/n8n-auto-install"
+
+# Instalar dependencias
+sudo apt update && sudo apt install -y curl git
+sudo apt install -y docker.io nginx certbot python3-certbot-nginx
+
+# Configurar Docker
+sudo systemctl start docker
+sudo systemctl enable docker
+
+# Crear directorio de trabajo
+sudo mkdir -p $SCRIPT_DIR && cd $SCRIPT_DIR
+
+# Descargar plantillas
+sudo curl -sO https://raw.githubusercontent.com/n8n-io/n8n/main/docker-compose.yml
+sudo curl -sO https://raw.githubusercontent.com/n8n-io/n8n/main/.env.example > .env
+
+# Configurar variables de entorno
+sudo sed -i "s/N8N_HOST=localhost/N8N_HOST=$DOMAIN/" .env
+sudo sed -i "s/WEBHOOK_URL=/WEBHOOK_URL=https:\/\/$DOMAIN\//" .env
+sudo sed -i "s#~/.n8n#/root/.n8n#" docker-compose.yml
+
+# Iniciar contenedor n8n
+sudo docker-compose up -d
+
+# Configurar Nginx
+sudo tee /etc/nginx/sites-available/n8n > /dev/null <<EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+
+    location / {
+        proxy_pass http://localhost:$N8N_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'Upgrade';
+        proxy_set_header Host \$host;
+        proxy_cache_bypass \$http_upgrade;
+        proxy_buffering off;
+    }
+}
+EOF
+
+sudo ln -sf /etc/nginx/sites-available/n8n /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl restart nginx
+
+# Obtener certificado SSL
+sudo certbot --nginx -d $DOMAIN --non-interactive --agree-tos
+
+# Limpiar instalación
+sudo rm -rf $SCRIPT_DIR
+echo "✅ Instalación completada! Accede en: https://$DOMAIN"
