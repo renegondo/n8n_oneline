@@ -1,5 +1,12 @@
 #!/bin/bash
-
+reset_previous_installation() {
+    echo "🧹 Limpiando instalaciones previas..."
+    sudo docker rm -f n8n 2>/dev/null
+    sudo rm -rf /etc/nginx/sites-{available,enabled}/n8n 2>/dev/null
+    sudo certbot delete --noninteractive --cert-name "$DOMAIN" 2>/dev/null
+    sudo rm -rf /tmp/n8n-auto-install ~/.n8n 2>/dev/null
+    echo "✅ Limpieza completada"
+}
 # Solicitar datos
 echo -e "\e[32mIngresa el subdominio completo (ej: n8n.tudominio.com): \e[0m"
 read DOMAIN
@@ -22,45 +29,36 @@ sudo apt update && sudo apt install -y curl git docker.io nginx certbot python3-
 # Configurar Docker
 sudo systemctl start docker
 sudo systemctl enable docker
-sudo usermod -aG docker $USER  # Corrige permisos sin necesidad de sudo constante
+sudo usermod -aG docker $USER
 
-# Preparar entorno
-sudo mkdir -p $SCRIPT_DIR && cd $SCRIPT_DIR
+# Preparar entorno con permisos adecuados
+sudo mkdir -p $SCRIPT_DIR
+sudo chown $USER:$USER $SCRIPT_DIR  # Cambiar dueño del directorio
+cd $SCRIPT_DIR
 
-# Descargar configuración oficial de n8n
-sudo curl -sO https://raw.githubusercontent.com/n8n-io/n8n/main/docker-compose.yml
-sudo curl -sO https://raw.githubusercontent.com/n8n-io/n8n/main/.env.example > .env
+# Descargar plantillas con permisos correctos
+curl -sO https://raw.githubusercontent.com/n8n-io/n8n/main/docker-compose.yml
+curl -s https://raw.githubusercontent.com/n8n-io/n8n/main/.env.example | tee .env >/dev/null
 
-# Configurar variables
-sudo sed -i "s/N8N_HOST=localhost/N8N_HOST=$DOMAIN/" .env
-sudo sed -i "s/WEBHOOK_URL=/WEBHOOK_URL=https:\/\/$DOMAIN\//" .env
-sudo sed -i "s#~/.n8n#/root/.n8n#" docker-compose.yml
+# Verificar existencia de archivos
+if [ ! -f "docker-compose.yml" ] || [ ! -f ".env" ]; then
+    echo -e "\e[31mError: Fallo al descargar archivos de configuración\e[0m"
+    exit 1
+fi
+
+# Configurar variables de entorno
+sed -i "s/N8N_HOST=localhost/N8N_HOST=$DOMAIN/" .env
+sed -i "s/WEBHOOK_URL=/WEBHOOK_URL=https:\/\/$DOMAIN\//" .env
+sed -i "s#~/.n8n#/root/.n8n#" docker-compose.yml
 
 # Iniciar contenedor
 sudo docker-compose up -d
 
-# Configurar Nginx (HTTP + HTTPS)
+# Configurar Nginx
 sudo tee /etc/nginx/sites-available/n8n >/dev/null <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
-
-    location / {
-        proxy_pass http://localhost:$N8N_PORT;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'Upgrade';
-        proxy_set_header Host \$host;
-        proxy_cache_bypass \$http_upgrade;
-    }
-}
-
-server {
-    listen 443 ssl;
-    server_name $DOMAIN;
-
-    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
 
     location / {
         proxy_pass http://localhost:$N8N_PORT;
@@ -79,9 +77,6 @@ sudo nginx -t && sudo systemctl restart nginx
 
 # Obtener SSL
 sudo certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL --redirect
-
-# Forzar reinicio final
-sudo systemctl restart nginx
 
 # Limpiar
 sudo rm -rf $SCRIPT_DIR
