@@ -1,8 +1,18 @@
 #!/bin/bash
 
-# Solicitar subdominio interactivamente
+# Solicitar datos necesarios
 echo -e "\e[32mIngresa el subdominio para n8n (ej: n8n.tudominio.com): \e[0m"
 read SUBDOMINIO
+
+echo -e "\e[32mIngresa tu email para Let's Encrypt (notificaciones de certificado): \e[0m"
+read EMAIL
+
+# Validar formato de email
+while [[ ! "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; do
+    echo -e "\e[31mEmail inválido. Ingresa un email válido:\e[0m"
+    read EMAIL
+done
+
 DOMAIN="$SUBDOMINIO"
 N8N_PORT=5678
 SCRIPT_DIR="/tmp/n8n-auto-install"
@@ -51,9 +61,19 @@ EOF
 sudo ln -sf /etc/nginx/sites-available/n8n /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl restart nginx
 
-# Obtener certificado SSL
-sudo certbot --nginx -d $DOMAIN --non-interactive --agree-tos
+# Obtener certificado SSL con email
+sudo certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL
+
+# Agregar headers de WebSocket en configuración SSL
+sudo sed -i '/listen 443 ssl/,/^    }/ { 
+    /proxy_pass http:\/\/localhost:5678;/a \
+        proxy_set_header Connection '\''Upgrade'\'';\
+        proxy_set_header Upgrade \$http_upgrade;
+}' /etc/nginx/sites-available/n8n
+
+# Reiniciar Nginx
+sudo systemctl restart nginx
 
 # Limpiar instalación
 sudo rm -rf $SCRIPT_DIR
-echo "✅ Instalación completada! Accede en: https://$DOMAIN"
+echo -e "\n✅ Instalación completada! Accede en: \e[1mhttps://$DOMAIN\e[0m"
