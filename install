@@ -1,47 +1,46 @@
 #!/bin/bash
 
-# Solicitar datos necesarios
-echo -e "\e[32mIngresa el subdominio para n8n (ej: n8n.tudominio.com): \e[0m"
-read SUBDOMINIO
-
-echo -e "\e[32mIngresa tu email para Let's Encrypt (notificaciones de certificado): \e[0m"
+# Solicitar datos
+echo -e "\e[32mIngresa el subdominio completo (ej: n8n.tudominio.com): \e[0m"
+read DOMAIN
+echo -e "\e[32mIngresa tu email para Let's Encrypt: \e[0m"
 read EMAIL
 
-# Validar formato de email
+# Validar email
 while [[ ! "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; do
     echo -e "\e[31mEmail inválido. Ingresa un email válido:\e[0m"
     read EMAIL
 done
 
-DOMAIN="$SUBDOMINIO"
+# Configuración
 N8N_PORT=5678
 SCRIPT_DIR="/tmp/n8n-auto-install"
 
 # Instalar dependencias
-sudo apt update && sudo apt install -y curl git
-sudo apt install -y docker.io nginx certbot python3-certbot-nginx
+sudo apt update && sudo apt install -y curl git docker.io nginx certbot python3-certbot-nginx
 
 # Configurar Docker
 sudo systemctl start docker
 sudo systemctl enable docker
+sudo usermod -aG docker $USER  # Corrige permisos sin necesidad de sudo constante
 
-# Crear directorio de trabajo
+# Preparar entorno
 sudo mkdir -p $SCRIPT_DIR && cd $SCRIPT_DIR
 
-# Descargar plantillas
+# Descargar configuración oficial de n8n
 sudo curl -sO https://raw.githubusercontent.com/n8n-io/n8n/main/docker-compose.yml
 sudo curl -sO https://raw.githubusercontent.com/n8n-io/n8n/main/.env.example > .env
 
-# Configurar variables de entorno
+# Configurar variables
 sudo sed -i "s/N8N_HOST=localhost/N8N_HOST=$DOMAIN/" .env
 sudo sed -i "s/WEBHOOK_URL=/WEBHOOK_URL=https:\/\/$DOMAIN\//" .env
 sudo sed -i "s#~/.n8n#/root/.n8n#" docker-compose.yml
 
-# Iniciar contenedor n8n
+# Iniciar contenedor
 sudo docker-compose up -d
 
-# Configurar Nginx
-sudo tee /etc/nginx/sites-available/n8n > /dev/null <<EOF
+# Configurar Nginx (HTTP + HTTPS)
+sudo tee /etc/nginx/sites-available/n8n >/dev/null <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
@@ -53,27 +52,37 @@ server {
         proxy_set_header Connection 'Upgrade';
         proxy_set_header Host \$host;
         proxy_cache_bypass \$http_upgrade;
-        proxy_buffering off;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name $DOMAIN;
+
+    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+
+    location / {
+        proxy_pass http://localhost:$N8N_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'Upgrade';
+        proxy_set_header Host \$host;
+        proxy_cache_bypass \$http_upgrade;
     }
 }
 EOF
 
+# Habilitar sitio
 sudo ln -sf /etc/nginx/sites-available/n8n /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl restart nginx
 
-# Obtener certificado SSL con email
-sudo certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL
+# Obtener SSL
+sudo certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL --redirect
 
-# Agregar headers de WebSocket en configuración SSL
-sudo sed -i '/listen 443 ssl/,/^    }/ { 
-    /proxy_pass http:\/\/localhost:5678;/a \
-        proxy_set_header Connection '\''Upgrade'\'';\
-        proxy_set_header Upgrade \$http_upgrade;
-}' /etc/nginx/sites-available/n8n
-
-# Reiniciar Nginx
+# Forzar reinicio final
 sudo systemctl restart nginx
 
-# Limpiar instalación
+# Limpiar
 sudo rm -rf $SCRIPT_DIR
 echo -e "\n✅ Instalación completada! Accede en: \e[1mhttps://$DOMAIN\e[0m"
