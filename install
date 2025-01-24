@@ -23,28 +23,33 @@ done
 N8N_PORT=5678
 SCRIPT_DIR="/tmp/n8n-auto-install"
 
-# Instalar dependencias
-sudo apt update && sudo apt install -y curl git docker.io nginx certbot python3-certbot-nginx
+# Limpiar instalación previa
+sudo docker rm -f n8n 2>/dev/null
+sudo rm -f /etc/nginx/sites-{available,enabled}/n8n 2>/dev/null
+sudo rm -rf "$SCRIPT_DIR" ~/.n8n 2>/dev/null
+
+# Instalar dependencias esenciales
+sudo apt update && sudo apt install -y \
+    curl \
+    git \
+    docker.io \
+    docker-compose-plugin \
+    nginx \
+    certbot \
+    python3-certbot-nginx
 
 # Configurar Docker
 sudo systemctl start docker
 sudo systemctl enable docker
 sudo usermod -aG docker $USER
+newgrp docker  # Actualizar grupos sin necesidad de logout
 
-# Preparar entorno con permisos adecuados
-sudo mkdir -p $SCRIPT_DIR
-sudo chown $USER:$USER $SCRIPT_DIR  # Cambiar dueño del directorio
-cd $SCRIPT_DIR
+# Preparar entorno
+mkdir -p "$SCRIPT_DIR" && cd "$SCRIPT_DIR"
 
-# Descargar plantillas con permisos correctos
+# Descargar plantillas
 curl -sO https://raw.githubusercontent.com/n8n-io/n8n/main/docker-compose.yml
-curl -s https://raw.githubusercontent.com/n8n-io/n8n/main/.env.example | tee .env >/dev/null
-
-# Verificar existencia de archivos
-if [ ! -f "docker-compose.yml" ] || [ ! -f ".env" ]; then
-    echo -e "\e[31mError: Fallo al descargar archivos de configuración\e[0m"
-    exit 1
-fi
+curl -s https://raw.githubusercontent.com/n8n-io/n8n/main/.env.example > .env
 
 # Configurar variables de entorno
 sed -i "s/N8N_HOST=localhost/N8N_HOST=$DOMAIN/" .env
@@ -52,9 +57,9 @@ sed -i "s/WEBHOOK_URL=/WEBHOOK_URL=https:\/\/$DOMAIN\//" .env
 sed -i "s#~/.n8n#/root/.n8n#" docker-compose.yml
 
 # Iniciar contenedor
-sudo docker-compose up -d
+sudo docker compose up -d
 
-# Configurar Nginx
+# Configurar Nginx básico (solo HTTP)
 sudo tee /etc/nginx/sites-available/n8n >/dev/null <<EOF
 server {
     listen 80;
@@ -75,9 +80,36 @@ EOF
 sudo ln -sf /etc/nginx/sites-available/n8n /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl restart nginx
 
-# Obtener SSL
+# Obtener certificado SSL
 sudo certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL --redirect
 
-# Limpiar
-sudo rm -rf $SCRIPT_DIR
+# Configurar Nginx completo (HTTPS)
+sudo tee /etc/nginx/sites-available/n8n >/dev/null <<EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name $DOMAIN;
+
+    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+
+    location / {
+        proxy_pass http://localhost:$N8N_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'Upgrade';
+        proxy_set_header Host \$host;
+        proxy_cache_bypass \$http_upgrade;
+    }
+}
+EOF
+
+# Reiniciar servicios finales
+sudo systemctl restart nginx docker
+
 echo -e "\n✅ Instalación completada! Accede en: \e[1mhttps://$DOMAIN\e[0m"
